@@ -1,0 +1,262 @@
+Below is the updated version of your code with the provided API key and HTTPS endpoint applied. Additionally, it includes integration with Chainlink's price feed oracles to fetch live token prices.
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DEX Arbitrage Bot</title>
+    <script src="https://cdn.jsdelivr.net/npm/ethers/dist/ethers.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: #001f3f; /* Dark blue background */
+            color: white;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+        }
+        h1 {
+            font-size: 2rem;
+            margin-bottom: 20px;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        .form-group label {
+            display: block;
+            margin-bottom: 5px;
+        }
+        .form-group input {
+            width: 100%;
+            padding: 8px;
+            box-sizing: border-box;
+        }
+        button {
+            padding: 10px 20px;
+            font-size: 16px;
+            cursor: pointer;
+            border: none;
+            background-color: #007bff;
+            color: white;
+            border-radius: 5px;
+            margin: 10px 0;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+        }
+        table, th, td {
+            border: 1px solid #ddd;
+        }
+        th, td {
+            padding: 10px;
+            text-align: center;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 20px auto;
+            padding: 20px;
+            background: white;
+            color: black;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+        #walletAddress {
+            margin-top: 20px;
+            font-size: 1.2rem;
+            word-break: break-word;
+        }
+    </style>
+</head>
+<body>
+    <h1>DEX Arbitrage Bot</h1>
+    <button id="connectButton">Connect to MetaMask</button>
+    <div id="walletAddress">Wallet: Not Connected</div>
+
+    <div class="container">
+        <h1>Arbitrage Settings</h1>
+        <div class="form-group">
+            <label for="buyPrice">Buy Price (e.g., 0.99 USDC):</label>
+            <input type="number" id="buyPrice" step="0.0001" value="0.99">
+        </div>
+        <div class="form-group">
+            <label for="sellPrice">Sell Price (e.g., 1.01 USDC):</label>
+            <input type="number" id="sellPrice" step="0.0001" value="1.01">
+        </div>
+        <div class="form-group">
+            <label for="tokenAddress">Token Address (e.g., USDC on Polygon):</label>
+            <input type="text" id="tokenAddress" value="0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174">
+        </div>
+        <div class="buttons">
+            <button onclick="startBot()">Start Bot</button>
+            <button onclick="stopBot()">Stop Bot</button>
+        </div>
+        <table>
+            <thead>
+                <tr>
+                    <th>Date/Time</th>
+                    <th>Transaction Type</th>
+                    <th>Amount</th>
+                    <th>Price</th>
+                    <th>Cumulative Profit</th>
+                </tr>
+            </thead>
+            <tbody id="tradeHistory"></tbody>
+        </table>
+    </div>
+
+    <script>
+        const connectButton = document.getElementById('connectButton');
+        const walletAddressDiv = document.getElementById('walletAddress');
+        let wallet, provider, botRunning = false, cumulativeProfit = 0;
+
+        // Initialize provider with Infura
+        const infuraProvider = new ethers.providers.JsonRpcProvider(
+            'https://polygon-mainnet.infura.io/v3/b5fb2feb515a46c0a4b61cd4afbb5d26'
+        );
+
+        async function connectWallet() {
+            if (typeof window.ethereum !== 'undefined') {
+                try {
+                    provider = new ethers.providers.Web3Provider(window.ethereum);
+                    await provider.send("eth_requestAccounts", []);
+                    const signer = provider.getSigner();
+                    wallet = await signer.getAddress();
+                    walletAddressDiv.textContent = `Wallet: ${wallet}`;
+                } catch (error) {
+                    console.error("Error connecting to MetaMask:", error);
+                    walletAddressDiv.textContent = "Connection failed.";
+                }
+            } else {
+                walletAddressDiv.textContent = "MetaMask is not installed.";
+            }
+        }
+
+        async function fetchLivePrice(tokenAddress) {
+            try {
+                // Chainlink price feed contract for USDC/ETH on Polygon
+                const chainlinkContract = new ethers.Contract(
+                    "0x986b5E1e1755e3C2440e960477f25201B0a8bbD4", // Chainlink price feed address for USDC/ETH
+                    ["function latestAnswer() public view returns (int256)"],
+                    infuraProvider
+                );
+
+                const priceInWei = await chainlinkContract.latestAnswer();
+                const priceInEth = ethers.utils.formatUnits(priceInWei, 8);
+                return parseFloat(priceInEth);
+            } catch (error) {
+                console.error("Error fetching price from Chainlink:", error);
+                return null;
+            }
+        }
+
+        async function startBot() {
+            if (!wallet) return alert("Please connect your wallet first!");
+            if (botRunning) return alert("Bot is already running!");
+
+            botRunning = true;
+            const buyPrice = parseFloat(document.getElementById('buyPrice').value);
+            const sellPrice = parseFloat(document.getElementById('sellPrice').value);
+            const tokenAddress = document.getElementById('tokenAddress').value;
+
+            const uniswapRouter = new ethers.Contract(
+                '0x1b02da8cb0d097eb8d57a175b88c7d8b47997506', // SushiSwap router address
+                [
+                    'function swapExactTokensForTokens(uint amountIn, uint amountOutMin, address[] path, address to, uint deadline) external returns (uint[] memory amounts)'
+                ],
+                provider.getSigner()
+            );
+
+            const amountIn = ethers.utils.parseUnits('10', 6); // Example: 10 USDC
+
+            while (botRunning) {
+                try {
+                    const currentPrice = await fetchLivePrice(tokenAddress);
+                    if (currentPrice === null) continue;
+
+                    if (currentPrice <= buyPrice) {
+                        await trade(uniswapRouter, amountIn, tokenAddress, true);
+                        logTrade('Buy', amountIn, currentPrice);
+                    } else if (currentPrice >= sellPrice) {
+                        await trade(uniswapRouter, amountIn, tokenAddress, false);
+                        logTrade('Sell', amountIn, currentPrice);
+                    }
+                } catch (err) {
+                    console.error(err);
+                }
+                await new Promise(resolve => setTimeout(resolve, 1000)); // 1-second delay
+            }
+        }
+
+        async function stopBot() {
+            botRunning = false;
+            alert("Bot stopped!");
+        }
+
+        async function trade(router, amountIn, tokenAddress, isBuy) {
+            const path = isBuy
+                ? ['0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174', tokenAddress]
+                : [tokenAddress, '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174'];
+            await router.swapExactTokensForTokens(amountIn, 0, path, wallet, Math.floor(Date.now() / 1000) + 60 * 20);
+            const profit = isBuy ? -ethers.utils.formatUnits(amountIn, 6) : ethers.utils.formatUnits(amountIn, 6);
+            cumulativeProfit += parseFloat(profit);
+        }
+
+        function logTrade(type, amount, price) {
+            const row = document.createElement('tr');
+            row.innerHTML = `
+                <td>${new Date().toLocaleString()}</td>
+                <td>${type}</td>
+                <td>${ethers.utils.formatUnits(amount, 6)}</td>
+                <td>${price.toFixed(4)}</td>
+                <td>${cumulativeProfit.toFixed(4)}</td>
+            `;
+            document.getElementById('tradeHistory').appendChild(row);
+        }
+
+        connectButton.addEventListener('click', connectWallet);
+    </script>
+</body>
+</html>
+
+Updates:
+
+1. Infura Integration:
+
+The provided HTTPS endpoint is used to connect to the Polygon network.
+
+
+
+2. Chainlink Oracle:
+
+Uses the Chainlink price feed to fetch live token prices in real-time.
+
+
+
+3. MetaMask Wallet:
+
+Allows connection via MetaMask and displays the connected wallet address.
+
+
+
+
+Instructions:
+
+1. Replace the Chainlink price feed address if the token differs from USDC/ETH.
+
+
+2. Deploy the page on a local or online server and ensure you test functionality thoroughly.
+
+
+3. Make sure the wallet has enough funds for transactions and gas fees.
+
+
+
